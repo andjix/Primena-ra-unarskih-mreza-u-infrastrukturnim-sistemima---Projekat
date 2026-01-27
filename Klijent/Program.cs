@@ -17,7 +17,7 @@ namespace FileClient
             IPEndPoint serverEP = new IPEndPoint(IPAddress.Loopback, TCP_PORT);
             byte[] buffer = new byte[8192];
 
-            Console.Write("Unesi ClientId (npr. Andja): ");
+            Console.Write("Unesi ClientId (npr. Filip): ");
             string clientId = Console.ReadLine();
 
             Console.WriteLine("Pritisni Enter za povezivanje...");
