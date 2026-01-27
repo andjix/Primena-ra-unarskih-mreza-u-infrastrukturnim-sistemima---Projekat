@@ -12,7 +12,7 @@ namespace FileClient
 
         static void Main(string[] args)
         {
-            // TCP povezivanje (kao na vežbama)
+            // TCP povezivanje
             Socket clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             IPEndPoint serverEP = new IPEndPoint(IPAddress.Loopback, TCP_PORT);
             byte[] buffer = new byte[8192];
@@ -71,7 +71,7 @@ namespace FileClient
                     request = $"DOWNLOAD|{name}";
                     string resp = TcpSendReceive(clientSocket, request, buffer);
 
-                    // lep “skolski” ispis sadrzaja
+                    
                     // OK|DOWNLOAD|author|base64
                     var parts = resp.Split('|');
                     if (parts.Length >= 4 && parts[0] == "OK" && parts[1] == "DOWNLOAD")

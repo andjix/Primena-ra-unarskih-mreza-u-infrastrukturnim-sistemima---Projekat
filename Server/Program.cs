@@ -40,7 +40,7 @@ namespace FileServer
             // UDP server start (u pozadini)
             Task.Run(() => UdpStatsServer());
 
-            // TCP server (kao na vežbama)
+            // TCP server
             Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             IPEndPoint serverEP = new IPEndPoint(IPAddress.Any, TCP_PORT);
             serverSocket.Bind(serverEP);
@@ -106,7 +106,7 @@ namespace FileServer
                     }
                     catch
                     {
-                        // ignoriši sitne greške da server ne padne
+                        
                     }
                 }
             }
@@ -300,7 +300,7 @@ namespace FileServer
                 }
                 catch
                 {
-                    // nek radi "skolski": ignorisi
+                    
                 }
             }
         }
