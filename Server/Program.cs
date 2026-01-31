@@ -4,11 +4,9 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading.Tasks;
 
-namespace FileServer
+namespace RepositoryServer
 {
-    [Serializable]
     class FileData
     {
         public string Name;
@@ -22,91 +20,66 @@ namespace FileServer
         public string LockedBy;
     }
 
-    internal class Server
+    internal class Program
     {
         const int SOMAXCONN = 126;
-
-        // TCP port za operacije nad datotekama
-        const int TCP_PORT = 19010;
-
-        // UDP port za pregled stanja (STATS)
-        const int UDP_PORT = 19011;
+        const int REPO_TCP_PORT = 19100; // RequestManager <-> Repository
 
         static Dictionary<string, FileData> files = new Dictionary<string, FileData>(StringComparer.OrdinalIgnoreCase);
         static object locker = new object();
 
         static void Main(string[] args)
         {
-            // UDP server start (u pozadini)
-            Task.Run(() => UdpStatsServer());
+            Socket repoSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            IPEndPoint repoEP = new IPEndPoint(IPAddress.Any, REPO_TCP_PORT);
+            repoSocket.Bind(repoEP);
 
-            // TCP server
-            Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            IPEndPoint serverEP = new IPEndPoint(IPAddress.Any, TCP_PORT);
-            serverSocket.Bind(serverEP);
+            repoSocket.Blocking = false;
+            repoSocket.Listen(SOMAXCONN);
 
-            serverSocket.Blocking = false;
-            serverSocket.Listen(SOMAXCONN);
+            Console.WriteLine($"[SERVER] Repozitorijum slusa na {repoEP}");
 
-            Console.WriteLine($"TCP Server slusa na {serverEP} (operacije nad datotekama)");
-            Console.WriteLine($"UDP Server slusa na {IPAddress.Any}:{UDP_PORT} (STATS)");
-            Console.WriteLine("Pritisni Enter za start...");
-            Console.ReadLine();
-
-            List<Socket> acceptedSockets = new List<Socket>();
+            List<Socket> accepted = new List<Socket>();
             byte[] buffer = new byte[8192];
 
             while (true)
             {
-                // prihvatanje novih klijenata
-                if (serverSocket.Poll(2000 * 1000, SelectMode.SelectRead))
+                if (repoSocket.Poll(2000 * 1000, SelectMode.SelectRead))
                 {
-                    Socket acceptedSocket = serverSocket.Accept();
-                    acceptedSocket.Blocking = false;
-                    acceptedSockets.Add(acceptedSocket);
-
-                    IPEndPoint clientEP = acceptedSocket.RemoteEndPoint as IPEndPoint;
-                    Console.WriteLine($"Povezao se klijent: {clientEP}");
+                    Socket s = repoSocket.Accept();
+                    s.Blocking = false;
+                    accepted.Add(s);
+                    Console.WriteLine("[SERVER] Povezan upravljac zahteva.");
                 }
 
-                // obrada zahteva (više klijenata)
-                for (int i = acceptedSockets.Count - 1; i >= 0; i--)
+                for (int i = accepted.Count - 1; i >= 0; i--)
                 {
-                    Socket s = acceptedSockets[i];
-
+                    Socket s = accepted[i];
                     try
                     {
                         if (s.Poll(10 * 1000, SelectMode.SelectRead))
                         {
-                            int brBajta = s.Receive(buffer);
+                            int br = s.Receive(buffer);
 
-                            // klijent prekinuo
-                            if (brBajta == 0)
+                            if (br == 0)
                             {
-                                Console.WriteLine("Klijent se diskonektovao.");
+                                Console.WriteLine("[SERVER] Upravljač zahteva diskonekt.");
                                 s.Close();
-                                acceptedSockets.RemoveAt(i);
+                                accepted.RemoveAt(i);
                                 continue;
                             }
 
-                            string request = Encoding.UTF8.GetString(buffer, 0, brBajta).Trim();
-                            if (request.Length == 0) continue;
+                            string req = Encoding.UTF8.GetString(buffer, 0, br).Trim();
+                            if (req.Length == 0) continue;
 
-                            string response = HandleRequest(request);
-
-                            byte[] respBytes = Encoding.UTF8.GetBytes(response);
-                            s.Send(respBytes);
+                            string resp = HandleRequest(req);
+                            s.Send(Encoding.UTF8.GetBytes(resp));
                         }
-                    }
-                    catch (SocketException)
-                    {
-                        // greška ili diskonekt -> ukloni socket
-                        try { s.Close(); } catch { }
-                        acceptedSockets.RemoveAt(i);
                     }
                     catch
                     {
-                        
+                        try { s.Close(); } catch { }
+                        accepted.RemoveAt(i);
                     }
                 }
             }
@@ -114,12 +87,14 @@ namespace FileServer
 
         static string HandleRequest(string request)
         {
-            // Komande: KOMANDA|p1|p2|p3
             string[] parts = request.Split('|');
             string cmd = parts[0].ToUpperInvariant();
 
             switch (cmd)
             {
+                case "HELLO":
+                    return "OK|HELLO";
+
                 case "LIST":
                     return CmdList();
 
@@ -131,13 +106,18 @@ namespace FileServer
                     if (parts.Length < 2) return "ERROR|BAD_FORMAT";
                     return CmdDownload(parts[1]);
 
-                case "LOCK":
+                // AUTO LOCK protokol (ne postoji u meniju, ali radi u pozadini)
+                case "OPEN":
                     if (parts.Length < 3) return "ERROR|BAD_FORMAT";
-                    return CmdLock(parts[1], parts[2]);
+                    return CmdOpen(parts[1], parts[2]);
 
-                case "UNLOCK":
+                case "CLOSE":
                     if (parts.Length < 3) return "ERROR|BAD_FORMAT";
-                    return CmdUnlock(parts[1], parts[2]);
+                    return CmdClose(parts[1], parts[2]);
+
+                case "RELEASE_ALL":
+                    if (parts.Length < 2) return "ERROR|BAD_FORMAT";
+                    return CmdReleaseAll(parts[1]);
 
                 case "EDIT":
                     if (parts.Length < 4) return "ERROR|BAD_FORMAT";
@@ -146,6 +126,9 @@ namespace FileServer
                 case "DELETE":
                     if (parts.Length < 3) return "ERROR|BAD_FORMAT";
                     return CmdDelete(parts[1], parts[2]);
+
+                case "STATS":
+                    return CmdStats();
 
                 default:
                     return "ERROR|UNKNOWN_COMMAND";
@@ -158,7 +141,6 @@ namespace FileServer
             {
                 if (files.Count == 0) return "OK|LIST|EMPTY";
 
-                // OK|LIST|name,author,locked;name2,author2,locked
                 var items = files.Values
                     .OrderBy(f => f.Name)
                     .Select(f => $"{f.Name},{f.Author},{(f.IsLocked ? "1" : "0")}");
@@ -204,13 +186,15 @@ namespace FileServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
+                // download je dozvoljen i ako je zaključan (čitanje)
                 f.LastAccessUtc = DateTime.UtcNow;
+
                 string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(f.Content ?? ""));
                 return "OK|DOWNLOAD|" + f.Author + "|" + b64;
             }
         }
 
-        static string CmdLock(string name, string clientId)
+        static string CmdOpen(string name, string clientId)
         {
             lock (locker)
             {
@@ -219,22 +203,39 @@ namespace FileServer
 
                 f.IsLocked = true;
                 f.LockedBy = clientId ?? "";
-                return "OK|LOCKED";
+                return "OK|OPENED";
             }
         }
 
-        static string CmdUnlock(string name, string clientId)
+        static string CmdClose(string name, string clientId)
         {
             lock (locker)
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
                 if (!f.IsLocked) return "ERROR|NOT_LOCKED";
+
                 if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
                     return "ERROR|LOCKED_BY|" + f.LockedBy;
 
                 f.IsLocked = false;
                 f.LockedBy = "";
-                return "OK|UNLOCKED";
+                return "OK|CLOSED";
+            }
+        }
+
+        static string CmdReleaseAll(string clientId)
+        {
+            lock (locker)
+            {
+                foreach (var f in files.Values)
+                {
+                    if (f.IsLocked && string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
+                    {
+                        f.IsLocked = false;
+                        f.LockedBy = "";
+                    }
+                }
+                return "OK|RELEASED";
             }
         }
 
@@ -244,8 +245,9 @@ namespace FileServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
-                // "alarm" uslov: ako je zauzeto od drugog, odbij
-                if (f.IsLocked && !string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
+                // Mora prvo OPEN da bi mogao EDIT
+                if (!f.IsLocked) return "ERROR|NOT_OPENED";
+                if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
                     return "ERROR|LOCKED_BY|" + f.LockedBy;
 
                 string newContent;
@@ -270,8 +272,9 @@ namespace FileServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
-                // "alarm" uslov
-                if (f.IsLocked && !string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
+                // Mora prvo OPEN da bi mogao DELETE
+                if (!f.IsLocked) return "ERROR|NOT_OPENED";
+                if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
                     return "ERROR|LOCKED_BY|" + f.LockedBy;
 
                 files.Remove(name);
@@ -279,33 +282,7 @@ namespace FileServer
             }
         }
 
-        static void UdpStatsServer()
-        {
-            UdpClient udp = new UdpClient(UDP_PORT);
-            IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-
-            while (true)
-            {
-                try
-                {
-                    byte[] reqBytes = udp.Receive(ref remote);
-                    string req = Encoding.UTF8.GetString(reqBytes).Trim();
-
-                    string resp = "ERROR|UDP_ONLY_STATS";
-                    if (req.ToUpperInvariant() == "STATS")
-                        resp = BuildStats();
-
-                    byte[] respBytes = Encoding.UTF8.GetBytes(resp);
-                    udp.Send(respBytes, respBytes.Length, remote);
-                }
-                catch
-                {
-                    
-                }
-            }
-        }
-
-        static string BuildStats()
+        static string CmdStats()
         {
             lock (locker)
             {

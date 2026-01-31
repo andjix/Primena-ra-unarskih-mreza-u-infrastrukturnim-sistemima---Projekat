@@ -7,12 +7,11 @@ namespace FileClient
 {
     internal class Client
     {
-        const int TCP_PORT = 19010;
-        const int UDP_PORT = 19011;
+        const int TCP_PORT = 19010; // ide na RequestManager
+        const int UDP_PORT = 19011; // ide na RequestManager
 
         static void Main(string[] args)
         {
-            // TCP povezivanje
             Socket clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             IPEndPoint serverEP = new IPEndPoint(IPAddress.Loopback, TCP_PORT);
             byte[] buffer = new byte[8192];
@@ -24,7 +23,10 @@ namespace FileClient
             Console.ReadLine();
 
             clientSocket.Connect(serverEP);
-            Console.WriteLine("Povezan na server (TCP)!");
+            Console.WriteLine("Povezan na upravljac zahteva (TCP)!");
+
+            // HELLO da RequestManager zna koji je clientId vezan za ovaj socket
+            TcpSendReceive(clientSocket, $"HELLO|{clientId}", buffer);
 
             while (true)
             {
@@ -32,23 +34,17 @@ namespace FileClient
                 Console.WriteLine("1) LIST");
                 Console.WriteLine("2) UPLOAD");
                 Console.WriteLine("3) DOWNLOAD");
-                Console.WriteLine("4) LOCK");
-                Console.WriteLine("5) EDIT");
-                Console.WriteLine("6) UNLOCK");
-                Console.WriteLine("7) DELETE");
-                Console.WriteLine("8) STATS (UDP)");
-                Console.WriteLine("9) KRAJ");
+                Console.WriteLine("4) RAD SA DATOTEKOM (EDIT/DELETE) [AUTO-LOCK]");
+                Console.WriteLine("5) STATS (UDP)");
+                Console.WriteLine("6) KRAJ");
                 Console.Write("Izbor: ");
                 string izbor = Console.ReadLine();
 
-                if (izbor == "9") break;
-
-                string request = "";
+                if (izbor == "6") break;
 
                 if (izbor == "1")
                 {
-                    request = "LIST";
-                    TcpSendReceive(clientSocket, request, buffer);
+                    TcpSendReceive(clientSocket, "LIST", buffer);
                 }
                 else if (izbor == "2")
                 {
@@ -60,19 +56,15 @@ namespace FileClient
                     string content = Console.ReadLine();
 
                     string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(content ?? ""));
-                    request = $"UPLOAD|{name}|{author}|{b64}";
-                    TcpSendReceive(clientSocket, request, buffer);
+                    TcpSendReceive(clientSocket, $"UPLOAD|{name}|{author}|{b64}", buffer);
                 }
                 else if (izbor == "3")
                 {
                     Console.Write("Ime fajla: ");
                     string name = Console.ReadLine();
 
-                    request = $"DOWNLOAD|{name}";
-                    string resp = TcpSendReceive(clientSocket, request, buffer);
-
-                    
-                    // OK|DOWNLOAD|author|base64
+                    string resp = TcpSendReceive(clientSocket, $"DOWNLOAD|{name}", buffer);
+     
                     var parts = resp.Split('|');
                     if (parts.Length >= 4 && parts[0] == "OK" && parts[1] == "DOWNLOAD")
                     {
@@ -84,40 +76,9 @@ namespace FileClient
                 }
                 else if (izbor == "4")
                 {
-                    Console.Write("Ime fajla: ");
-                    string name = Console.ReadLine();
-
-                    request = $"LOCK|{name}|{clientId}";
-                    TcpSendReceive(clientSocket, request, buffer);
+                    WorkWithFile(clientSocket, clientId, buffer);
                 }
                 else if (izbor == "5")
-                {
-                    Console.Write("Ime fajla: ");
-                    string name = Console.ReadLine();
-                    Console.Write("Novi sadrzaj (jedna linija): ");
-                    string content = Console.ReadLine();
-
-                    string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(content ?? ""));
-                    request = $"EDIT|{name}|{clientId}|{b64}";
-                    TcpSendReceive(clientSocket, request, buffer);
-                }
-                else if (izbor == "6")
-                {
-                    Console.Write("Ime fajla: ");
-                    string name = Console.ReadLine();
-
-                    request = $"UNLOCK|{name}|{clientId}";
-                    TcpSendReceive(clientSocket, request, buffer);
-                }
-                else if (izbor == "7")
-                {
-                    Console.Write("Ime fajla: ");
-                    string name = Console.ReadLine();
-
-                    request = $"DELETE|{name}|{clientId}";
-                    TcpSendReceive(clientSocket, request, buffer);
-                }
-                else if (izbor == "8")
                 {
                     UdpStats(serverEP.Address.ToString(), UDP_PORT);
                 }
@@ -129,6 +90,57 @@ namespace FileClient
 
             Console.WriteLine("Klijent zavrsava sa radom.");
             clientSocket.Close();
+        }
+
+        static void WorkWithFile(Socket clientSocket, string clientId, byte[] buffer)
+        {
+            Console.Write("Ime fajla: ");
+            string name = Console.ReadLine();
+
+            // automatski OPEN (zakljucavanje u pozadini)
+            string openResp = TcpSendReceive(clientSocket, $"OPEN|{name}|{clientId}", buffer);
+            if (!openResp.StartsWith("OK|OPENED"))
+            {
+                return;
+            }
+
+            bool deleted = false;
+
+            while (true)
+            {
+                Console.WriteLine("\n--- RAD SA DATOTEKOM ---");
+                Console.WriteLine("1) EDIT");
+                Console.WriteLine("2) DELETE");
+                Console.WriteLine("3) NAZAD (zatvori datoteku)");
+                Console.Write("Izbor: ");
+                string c = Console.ReadLine();
+
+                if (c == "3") break;
+
+                if (c == "1")
+                {
+                    Console.Write("Novi sadrzaj (jedna linija): ");
+                    string content = Console.ReadLine();
+                    string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(content ?? ""));
+                    TcpSendReceive(clientSocket, $"EDIT|{name}|{clientId}|{b64}", buffer);
+                }
+                else if (c == "2")
+                {
+                    TcpSendReceive(clientSocket, $"DELETE|{name}|{clientId}", buffer);
+                    deleted = true;
+                    break;
+                }
+                else
+                {
+                    Console.WriteLine("Nepoznat izbor.");
+                }
+            }
+
+            // automatski CLOSE (ako fajl nije obrisan)
+            if (!deleted)
+            {
+                TcpSendReceive(clientSocket, $"CLOSE|{name}|{clientId}", buffer);
+            }
         }
 
         static string TcpSendReceive(Socket socket, string request, byte[] buffer)
