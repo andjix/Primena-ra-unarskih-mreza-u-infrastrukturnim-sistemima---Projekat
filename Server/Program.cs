@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace RepositoryServer
 {
@@ -23,13 +24,24 @@ namespace RepositoryServer
     internal class Program
     {
         const int SOMAXCONN = 126;
-        const int REPO_TCP_PORT = 19100; // RequestManager <-> Repository
+
+        // UDP repo port za PRIJAVA / LIST / STATS
+        const int REPO_UDP_PORT = 19000;
+
+        // TCP port za RequestManager <-> Repository
+        const int REPO_TCP_PORT = 19100;
+
+        // info koju repo vraca klijentu posle PRIJAVA
+        const int RM_TCP_PORT = 19010;
 
         static Dictionary<string, FileData> files = new Dictionary<string, FileData>(StringComparer.OrdinalIgnoreCase);
         static object locker = new object();
 
         static void Main(string[] args)
         {
+            // UDP servis za klijente (PRIJAVA/LIST/STATS)
+            Task.Run(() => UdpRepoServer());
+
             Socket repoSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             IPEndPoint repoEP = new IPEndPoint(IPAddress.Any, REPO_TCP_PORT);
             repoSocket.Bind(repoEP);
@@ -37,7 +49,8 @@ namespace RepositoryServer
             repoSocket.Blocking = false;
             repoSocket.Listen(SOMAXCONN);
 
-            Console.WriteLine($"[SERVER] Repozitorijum slusa na {repoEP}");
+            Console.WriteLine($"[SERVER] Repozitorijum TCP slusa na {repoEP}");
+            Console.WriteLine($"[SERVER] Repozitorijum UDP slusa na {IPAddress.Any}:{REPO_UDP_PORT}");
 
             List<Socket> accepted = new List<Socket>();
             byte[] buffer = new byte[8192];
@@ -49,7 +62,7 @@ namespace RepositoryServer
                     Socket s = repoSocket.Accept();
                     s.Blocking = false;
                     accepted.Add(s);
-                    Console.WriteLine("[SERVER] Povezan upravljac zahteva.");
+                    Console.WriteLine("[SERVER] Povezan upravljac zahteva (TCP).");
                 }
 
                 for (int i = accepted.Count - 1; i >= 0; i--)
@@ -85,6 +98,65 @@ namespace RepositoryServer
             }
         }
 
+        static void UdpRepoServer()
+        {
+            using (UdpClient udp = new UdpClient(REPO_UDP_PORT))
+            {
+                IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+
+                while (true)
+                {
+                    try
+                    {
+                        byte[] reqBytes = udp.Receive(ref remote);
+                        string req = Encoding.UTF8.GetString(reqBytes).Trim();
+                        if (string.IsNullOrWhiteSpace(req)) continue;
+
+                        string resp = HandleUdpRequest(req);
+
+                        byte[] respBytes = Encoding.UTF8.GetBytes(resp);
+                        udp.Send(respBytes, respBytes.Length, remote);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        static string HandleUdpRequest(string request)
+        {
+            // PRIJAVA|ClientId
+            // LIST
+            // STATS|ClientId|YYYY-MM-DD
+            var p = request.Split('|');
+            string cmd = p[0].ToUpperInvariant();
+
+            switch (cmd)
+            {
+                case "PRIJAVA":
+                    // repo vraca gde je RM TCP
+                    return "OK|PRIJAVA|RM_TCP_PORT|" + RM_TCP_PORT;
+
+                case "LIST":
+                    return CmdList(includeLastModified: true);
+
+                case "STATS":
+                    {
+                        string clientId = (p.Length >= 2) ? p[1] : "";
+                        DateTime? after = null;
+                        if (p.Length >= 3 && DateTime.TryParse(p[2], out var dt))
+                            after = dt.ToUniversalTime();
+
+                        return CmdStatsForText(clientId, after);
+                    }
+
+                default:
+                    return "ERROR|UNKNOWN_UDP_COMMAND";
+            }
+        }
+
         static string HandleRequest(string request)
         {
             string[] parts = request.Split('|');
@@ -96,7 +168,8 @@ namespace RepositoryServer
                     return "OK|HELLO";
 
                 case "LIST":
-                    return CmdList();
+                    // TCP LIST (preko RM) - vrati i lastModified da klijent moze da ispise po tekstu
+                    return CmdList(includeLastModified: true);
 
                 case "UPLOAD":
                     if (parts.Length < 4) return "ERROR|BAD_FORMAT";
@@ -106,7 +179,6 @@ namespace RepositoryServer
                     if (parts.Length < 2) return "ERROR|BAD_FORMAT";
                     return CmdDownload(parts[1]);
 
-                // AUTO LOCK protokol (ne postoji u meniju, ali radi u pozadini)
                 case "OPEN":
                     if (parts.Length < 3) return "ERROR|BAD_FORMAT";
                     return CmdOpen(parts[1], parts[2]);
@@ -127,15 +199,12 @@ namespace RepositoryServer
                     if (parts.Length < 3) return "ERROR|BAD_FORMAT";
                     return CmdDelete(parts[1], parts[2]);
 
-                case "STATS":
-                    return CmdStats();
-
                 default:
                     return "ERROR|UNKNOWN_COMMAND";
             }
         }
 
-        static string CmdList()
+        static string CmdList(bool includeLastModified)
         {
             lock (locker)
             {
@@ -143,7 +212,12 @@ namespace RepositoryServer
 
                 var items = files.Values
                     .OrderBy(f => f.Name)
-                    .Select(f => $"{f.Name},{f.Author},{(f.IsLocked ? "1" : "0")}");
+                    .Select(f =>
+                    {
+                        string lm = includeLastModified ? f.LastModifiedUtc.ToString("yyyy-MM-dd HH:mm:ss") : "";
+                        return $"{f.Name},{f.Author},{lm},{(f.IsLocked ? "1" : "0")}";
+                    });
+
                 return "OK|LIST|" + string.Join(";", items);
             }
         }
@@ -186,11 +260,10 @@ namespace RepositoryServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
-                // download je dozvoljen i ako je zaključan (čitanje)
                 f.LastAccessUtc = DateTime.UtcNow;
 
                 string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(f.Content ?? ""));
-                return "OK|DOWNLOAD|" + f.Author + "|" + b64;
+                return "OK|DOWNLOAD|" + f.Author + "|" + f.LastModifiedUtc.ToString("yyyy-MM-dd HH:mm:ss") + "|" + b64;
             }
         }
 
@@ -245,7 +318,6 @@ namespace RepositoryServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
-                // Mora prvo OPEN da bi mogao EDIT
                 if (!f.IsLocked) return "ERROR|NOT_OPENED";
                 if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
                     return "ERROR|LOCKED_BY|" + f.LockedBy;
@@ -272,7 +344,6 @@ namespace RepositoryServer
             {
                 if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
 
-                // Mora prvo OPEN da bi mogao DELETE
                 if (!f.IsLocked) return "ERROR|NOT_OPENED";
                 if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
                     return "ERROR|LOCKED_BY|" + f.LockedBy;
@@ -281,20 +352,32 @@ namespace RepositoryServer
                 return "OK|DELETED";
             }
         }
-
-        static string CmdStats()
+        // Autor i naziv datoteke menjane NAJSKORIJE posle odredjenog datuma
+        static string CmdStatsForText(string clientId, DateTime? afterUtc)
         {
             lock (locker)
             {
-                int total = files.Count;
-                long mem = files.Values.Sum(f => (long)((f.Content ?? "").Length));
+                var myFiles = files.Values
+                    .Where(f => string.Equals(f.Author ?? "", clientId ?? "", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(f => f.Name)
+                    .Select(f => $"{f.Name}:{(f.Content ?? "").Length}");
 
-                var byAuthor = files.Values
-                    .GroupBy(f => f.Author ?? "")
-                    .OrderBy(g => g.Key)
-                    .Select(g => $"{g.Key}={g.Count()}");
+                string myMemPart = string.Join(";", myFiles);
+                if (string.IsNullOrEmpty(myMemPart)) myMemPart = "EMPTY";
 
-                return "OK|STATS|TOTAL=" + total + "|MEM=" + mem + "|AUTHORS=" + string.Join(";", byAuthor);
+                IEnumerable<FileData> candidates = files.Values;
+                if (afterUtc.HasValue)
+                    candidates = candidates.Where(f => f.LastModifiedUtc >= afterUtc.Value);
+
+                var latest = candidates
+                    .OrderByDescending(f => f.LastModifiedUtc)
+                    .FirstOrDefault();
+
+                string latestPart = "NONE";
+                if (latest != null)
+                    latestPart = $"{latest.Author},{latest.Name},{latest.LastModifiedUtc:yyyy-MM-dd HH:mm:ss}";
+
+                return $"OK|STATS|MY_FILES={myMemPart}|LATEST_AFTER={latestPart}";
             }
         }
     }
