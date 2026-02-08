@@ -107,7 +107,7 @@ namespace FileClient
                 }
                 else if (izbor == "5")
                 {
-                    UdpStats(IPAddress.Loopback.ToString(), RM_UDP_PORT, clientId);
+                    UdpStats(IPAddress.Loopback.ToString(), REPO_UDP_PORT, clientId);
                 }
                 else
                 {

@@ -1,0 +1,8 @@
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\bin\Debug\RequestManager.exe.config
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\bin\Debug\RequestManager.exe
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\bin\Debug\RequestManager.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.csproj.AssemblyReference.cache
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.csproj.CoreCompileInputs.cache
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.exe
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.exe.config

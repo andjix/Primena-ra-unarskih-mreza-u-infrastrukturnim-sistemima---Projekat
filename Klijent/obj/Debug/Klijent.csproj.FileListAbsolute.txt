@@ -1,0 +1,8 @@
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\bin\Debug\Klijent.exe.config
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\bin\Debug\Klijent.exe
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\bin\Debug\Klijent.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\obj\Debug\Klijent.csproj.AssemblyReference.cache
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\obj\Debug\Klijent.csproj.CoreCompileInputs.cache
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\obj\Debug\Klijent.exe
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\obj\Debug\Klijent.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\Klijent\obj\Debug\Klijent.exe.config
