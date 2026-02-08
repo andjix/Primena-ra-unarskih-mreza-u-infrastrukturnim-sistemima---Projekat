@@ -1,384 +1,243 @@
-﻿using System;
+﻿using Common;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace RepositoryServer
 {
-    class FileData
-    {
-        public string Name;
-        public string Author;
-        public string Content;
-
-        public DateTime LastModifiedUtc;
-        public DateTime LastAccessUtc;
-
-        public bool IsLocked;
-        public string LockedBy;
-    }
-
     internal class Program
     {
         const int SOMAXCONN = 126;
 
-        // UDP repo port za PRIJAVA / LIST / STATS
-        const int REPO_UDP_PORT = 19000;
+        const int REPO_UDP_PORT = 19000;   
+        const int REPO_TCP_PORT = 19100;   // RM <-> Repo
+        const int RM_TCP_PORT = 19010;     // port koji repo javlja klijentu
 
-        // TCP port za RequestManager <-> Repository
-        const int REPO_TCP_PORT = 19100;
-
-        // info koju repo vraca klijentu posle PRIJAVA
-        const int RM_TCP_PORT = 19010;
-
-        static Dictionary<string, FileData> files = new Dictionary<string, FileData>(StringComparer.OrdinalIgnoreCase);
-        static object locker = new object();
+        static List<FileData> files = new List<FileData>();
+        static object guard = new object();
 
         static void Main(string[] args)
         {
-            // UDP servis za klijente (PRIJAVA/LIST/STATS)
-            Task.Run(() => UdpRepoServer());
+            Task.Run(() => UdpServer());
 
-            Socket repoSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            IPEndPoint repoEP = new IPEndPoint(IPAddress.Any, REPO_TCP_PORT);
-            repoSocket.Bind(repoEP);
+            Socket tcpServer = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            tcpServer.Bind(new IPEndPoint(IPAddress.Any, REPO_TCP_PORT));
+            tcpServer.Listen(SOMAXCONN);
+            tcpServer.Blocking = false;
 
-            repoSocket.Blocking = false;
-            repoSocket.Listen(SOMAXCONN);
+            Console.WriteLine($"[REPO] UDP {REPO_UDP_PORT}, TCP {REPO_TCP_PORT}");
 
-            Console.WriteLine($"[SERVER] Repozitorijum TCP slusa na {repoEP}");
-            Console.WriteLine($"[SERVER] Repozitorijum UDP slusa na {IPAddress.Any}:{REPO_UDP_PORT}");
-
-            List<Socket> accepted = new List<Socket>();
-            byte[] buffer = new byte[8192];
+            List<Socket> rms = new List<Socket>();
 
             while (true)
             {
-                if (repoSocket.Poll(2000 * 1000, SelectMode.SelectRead))
+                if (tcpServer.Poll(2000 * 1000, SelectMode.SelectRead))
                 {
-                    Socket s = repoSocket.Accept();
-                    s.Blocking = false;
-                    accepted.Add(s);
-                    Console.WriteLine("[SERVER] Povezan upravljac zahteva (TCP).");
+                    Socket rm = tcpServer.Accept();
+                    rm.Blocking = false;
+                    rms.Add(rm);
+                    Console.WriteLine("[REPO] RM connected.");
                 }
 
-                for (int i = accepted.Count - 1; i >= 0; i--)
+                for (int i = rms.Count - 1; i >= 0; i--)
                 {
-                    Socket s = accepted[i];
+                    Socket rm = rms[i];
                     try
                     {
-                        if (s.Poll(10 * 1000, SelectMode.SelectRead))
+                        if (!rm.Poll(10 * 1000, SelectMode.SelectRead))
+                            continue;
+
+                        object obj = ReceiveObject(rm);
+                        if (obj == null)
                         {
-                            int br = s.Receive(buffer);
-
-                            if (br == 0)
-                            {
-                                Console.WriteLine("[SERVER] Upravljač zahteva diskonekt.");
-                                s.Close();
-                                accepted.RemoveAt(i);
-                                continue;
-                            }
-
-                            string req = Encoding.UTF8.GetString(buffer, 0, br).Trim();
-                            if (req.Length == 0) continue;
-
-                            string resp = HandleRequest(req);
-                            s.Send(Encoding.UTF8.GetBytes(resp));
+                            rm.Close();
+                            rms.RemoveAt(i);
+                            continue;
                         }
+
+                        Response resp = HandleTcp(obj);
+                        SendObject(rm, resp);
                     }
                     catch
                     {
-                        try { s.Close(); } catch { }
-                        accepted.RemoveAt(i);
+                        try { rm.Close(); } catch { }
+                        rms.RemoveAt(i);
                     }
                 }
             }
         }
 
-        static void UdpRepoServer()
+        // UDP server koji odgovara na PRIJAVA, LIST i STATS komande
+
+        static void UdpServer()
         {
-            using (UdpClient udp = new UdpClient(REPO_UDP_PORT))
+            Socket udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            udp.Bind(new IPEndPoint(IPAddress.Any, REPO_UDP_PORT));
+
+            EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+            byte[] buffer = new byte[65536];
+
+            while (true)
             {
-                IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                int br = udp.ReceiveFrom(buffer, ref remote);
+                object obj = Serialization.FromBytes<object>(buffer.Take(br).ToArray());
 
-                while (true)
-                {
-                    try
-                    {
-                        byte[] reqBytes = udp.Receive(ref remote);
-                        string req = Encoding.UTF8.GetString(reqBytes).Trim();
-                        if (string.IsNullOrWhiteSpace(req)) continue;
-
-                        string resp = HandleUdpRequest(req);
-
-                        byte[] respBytes = Encoding.UTF8.GetBytes(resp);
-                        udp.Send(respBytes, respBytes.Length, remote);
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-                }
+                Response resp = HandleUdp(obj);
+                byte[] outBytes = Serialization.ToBytes(resp);
+                udp.SendTo(outBytes, remote);
             }
         }
 
-        static string HandleUdpRequest(string request)
+        static Response HandleUdp(object obj)
         {
-            // PRIJAVA|ClientId
-            // LIST
-            // STATS|ClientId|YYYY-MM-DD
-            var p = request.Split('|');
+            string s = obj as string;
+            if (s == null) return new Response { Ok = false, Message = "BAD_UDP" };
+
+            string[] p = s.Split('|');
             string cmd = p[0].ToUpperInvariant();
 
-            switch (cmd)
+            if (cmd == "PRIJAVA")
+                return new Response { Ok = true, RmTcpPort = RM_TCP_PORT };
+
+            if (cmd == "LIST")
             {
-                case "PRIJAVA":
-                    // repo vraca gde je RM TCP
-                    return "OK|PRIJAVA|RM_TCP_PORT|" + RM_TCP_PORT;
-
-                case "LIST":
-                    return CmdList(includeLastModified: true);
-
-                case "STATS":
+                lock (guard)
+                {
+                    return new Response
                     {
-                        string clientId = (p.Length >= 2) ? p[1] : "";
-                        DateTime? after = null;
-                        if (p.Length >= 3 && DateTime.TryParse(p[2], out var dt))
-                            after = dt.ToUniversalTime();
-
-                        return CmdStatsForText(clientId, after);
-                    }
-
-                default:
-                    return "ERROR|UNKNOWN_UDP_COMMAND";
+                        Ok = true,
+                        Files = files.Select(Clone).ToArray()
+                    };
+                }
             }
-        }
 
-        static string HandleRequest(string request)
-        {
-            string[] parts = request.Split('|');
-            string cmd = parts[0].ToUpperInvariant();
-
-            switch (cmd)
+            if (cmd == "STATS")
             {
-                case "HELLO":
-                    return "OK|HELLO";
+                string clientId = p.Length >= 2 ? p[1] : "";
+                DateTime after = DateTime.MinValue;
 
-                case "LIST":
-                    // TCP LIST (preko RM) - vrati i lastModified da klijent moze da ispise po tekstu
-                    return CmdList(includeLastModified: true);
+                if (p.Length >= 3)
+                    DateTime.TryParseExact(p[2], "yyyy-MM-dd",
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out after);
 
-                case "UPLOAD":
-                    if (parts.Length < 4) return "ERROR|BAD_FORMAT";
-                    return CmdUpload(parts[1], parts[2], parts[3]);
+                lock (guard)
+                {
+                    int mem = files
+                        .Where(f => f.Author == clientId)
+                        .Sum(f => (f.Content ?? "").Length);
 
-                case "DOWNLOAD":
-                    if (parts.Length < 2) return "ERROR|BAD_FORMAT";
-                    return CmdDownload(parts[1]);
+                    var latest = files
+                        .Where(f => ParseTime(f.LastModified) >= after)
+                        .OrderByDescending(f => ParseTime(f.LastModified))
+                        .FirstOrDefault();
 
-                case "OPEN":
-                    if (parts.Length < 3) return "ERROR|BAD_FORMAT";
-                    return CmdOpen(parts[1], parts[2]);
+                    string latestText = latest == null
+                        ? "NONE"
+                        : $"{latest.Author}|{latest.Name}|{latest.LastModified}";
 
-                case "CLOSE":
-                    if (parts.Length < 3) return "ERROR|BAD_FORMAT";
-                    return CmdClose(parts[1], parts[2]);
-
-                case "RELEASE_ALL":
-                    if (parts.Length < 2) return "ERROR|BAD_FORMAT";
-                    return CmdReleaseAll(parts[1]);
-
-                case "EDIT":
-                    if (parts.Length < 4) return "ERROR|BAD_FORMAT";
-                    return CmdEdit(parts[1], parts[2], parts[3]);
-
-                case "DELETE":
-                    if (parts.Length < 3) return "ERROR|BAD_FORMAT";
-                    return CmdDelete(parts[1], parts[2]);
-
-                default:
-                    return "ERROR|UNKNOWN_COMMAND";
-            }
-        }
-
-        static string CmdList(bool includeLastModified)
-        {
-            lock (locker)
-            {
-                if (files.Count == 0) return "OK|LIST|EMPTY";
-
-                var items = files.Values
-                    .OrderBy(f => f.Name)
-                    .Select(f =>
+                    return new Response
                     {
-                        string lm = includeLastModified ? f.LastModifiedUtc.ToString("yyyy-MM-dd HH:mm:ss") : "";
-                        return $"{f.Name},{f.Author},{lm},{(f.IsLocked ? "1" : "0")}";
-                    });
-
-                return "OK|LIST|" + string.Join(";", items);
-            }
-        }
-
-        static string CmdUpload(string name, string author, string base64Content)
-        {
-            lock (locker)
-            {
-                if (string.IsNullOrWhiteSpace(name)) return "ERROR|BAD_NAME";
-                if (files.ContainsKey(name)) return "ERROR|ALREADY_EXISTS";
-
-                string content;
-                try
-                {
-                    content = Encoding.UTF8.GetString(Convert.FromBase64String(base64Content));
+                        Ok = true,
+                        StatsText = $"MEM={mem};LATEST_AFTER={latestText}"
+                    };
                 }
-                catch
-                {
-                    return "ERROR|BAD_CONTENT";
-                }
-
-                files[name] = new FileData
-                {
-                    Name = name,
-                    Author = author ?? "",
-                    Content = content ?? "",
-                    LastModifiedUtc = DateTime.UtcNow,
-                    LastAccessUtc = DateTime.UtcNow,
-                    IsLocked = false,
-                    LockedBy = ""
-                };
-
-                return "OK|UPLOADED";
             }
+
+            return new Response { Ok = false, Message = "UNKNOWN_UDP" };
         }
 
-        static string CmdDownload(string name)
+        // TCP
+
+        static Response HandleTcp(object obj)
         {
-            lock (locker)
-            {
-                if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
+            if (obj is Request r)
+                return HandleRepoRequest(r, null);
 
-                f.LastAccessUtc = DateTime.UtcNow;
+            if (obj is object[] arr && arr[0] is Request rr && arr[1] is FileData fd)
+                return HandleRepoRequest(rr, fd);
 
-                string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(f.Content ?? ""));
-                return "OK|DOWNLOAD|" + f.Author + "|" + f.LastModifiedUtc.ToString("yyyy-MM-dd HH:mm:ss") + "|" + b64;
-            }
+            return new Response { Ok = false, Message = "BAD_TCP" };
         }
 
-        static string CmdOpen(string name, string clientId)
+        static Response HandleRepoRequest(Request r, FileData f)
         {
-            lock (locker)
+            lock (guard)
             {
-                if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
-                if (f.IsLocked) return "ERROR|LOCKED_BY|" + f.LockedBy;
-
-                f.IsLocked = true;
-                f.LockedBy = clientId ?? "";
-                return "OK|OPENED";
-            }
-        }
-
-        static string CmdClose(string name, string clientId)
-        {
-            lock (locker)
-            {
-                if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
-                if (!f.IsLocked) return "ERROR|NOT_LOCKED";
-
-                if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
-                    return "ERROR|LOCKED_BY|" + f.LockedBy;
-
-                f.IsLocked = false;
-                f.LockedBy = "";
-                return "OK|CLOSED";
-            }
-        }
-
-        static string CmdReleaseAll(string clientId)
-        {
-            lock (locker)
-            {
-                foreach (var f in files.Values)
+                if (r.Operation == OperationType.Add)
                 {
-                    if (f.IsLocked && string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
-                    {
-                        f.IsLocked = false;
-                        f.LockedBy = "";
-                    }
-                }
-                return "OK|RELEASED";
-            }
-        }
-
-        static string CmdEdit(string name, string clientId, string base64NewContent)
-        {
-            lock (locker)
-            {
-                if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
-
-                if (!f.IsLocked) return "ERROR|NOT_OPENED";
-                if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
-                    return "ERROR|LOCKED_BY|" + f.LockedBy;
-
-                string newContent;
-                try
-                {
-                    newContent = Encoding.UTF8.GetString(Convert.FromBase64String(base64NewContent));
-                }
-                catch
-                {
-                    return "ERROR|BAD_CONTENT";
+                    f.Author = r.ClientId;
+                    f.LastModified = Now();
+                    files.Add(Clone(f));
+                    return new Response { Ok = true };
                 }
 
-                f.Content = newContent ?? "";
-                f.LastModifiedUtc = DateTime.UtcNow;
-                return "OK|EDITED";
+                if (r.Operation == OperationType.Read)
+                {
+                    var x = files.FirstOrDefault(z => z.Name == r.FileName);
+                    if (x == null) return new Response { Ok = false, Message = "NOT_FOUND" };
+                    return new Response { Ok = true, File = Clone(x) };
+                }
+
+                if (r.Operation == OperationType.Edit)
+                {
+                    var x = files.FirstOrDefault(z => z.Name == r.FileName);
+                    if (x == null) return new Response { Ok = false, Message = "NOT_FOUND" };
+
+                    x.Content = f.Content;
+                    x.LastModified = Now();
+                    return new Response { Ok = true, File = Clone(x) };
+                }
+
+                if (r.Operation == OperationType.Delete)
+                {
+                    files.RemoveAll(z => z.Name == r.FileName);
+                    return new Response { Ok = true };
+                }
             }
+            return new Response { Ok = false };
         }
 
-        static string CmdDelete(string name, string clientId)
+        // TCP FRAMING
+
+        static void SendObject(Socket s, object o)
         {
-            lock (locker)
-            {
-                if (!files.TryGetValue(name, out FileData f)) return "ERROR|NOT_FOUND";
-
-                if (!f.IsLocked) return "ERROR|NOT_OPENED";
-                if (!string.Equals(f.LockedBy, clientId ?? "", StringComparison.OrdinalIgnoreCase))
-                    return "ERROR|LOCKED_BY|" + f.LockedBy;
-
-                files.Remove(name);
-                return "OK|DELETED";
-            }
+            byte[] data = Serialization.ToBytes(o);
+            s.Send(BitConverter.GetBytes(data.Length));
+            s.Send(data);
         }
-        // Autor i naziv datoteke menjane NAJSKORIJE posle odredjenog datuma
-        static string CmdStatsForText(string clientId, DateTime? afterUtc)
+
+        static object ReceiveObject(Socket s)
         {
-            lock (locker)
-            {
-                var myFiles = files.Values
-                    .Where(f => string.Equals(f.Author ?? "", clientId ?? "", StringComparison.OrdinalIgnoreCase))
-                    .OrderBy(f => f.Name)
-                    .Select(f => $"{f.Name}:{(f.Content ?? "").Length}");
+            byte[] len = ReceiveAll(s, 4);
+            if (len == null) return null;
 
-                string myMemPart = string.Join(";", myFiles);
-                if (string.IsNullOrEmpty(myMemPart)) myMemPart = "EMPTY";
-
-                IEnumerable<FileData> candidates = files.Values;
-                if (afterUtc.HasValue)
-                    candidates = candidates.Where(f => f.LastModifiedUtc >= afterUtc.Value);
-
-                var latest = candidates
-                    .OrderByDescending(f => f.LastModifiedUtc)
-                    .FirstOrDefault();
-
-                string latestPart = "NONE";
-                if (latest != null)
-                    latestPart = $"{latest.Author},{latest.Name},{latest.LastModifiedUtc:yyyy-MM-dd HH:mm:ss}";
-
-                return $"OK|STATS|MY_FILES={myMemPart}|LATEST_AFTER={latestPart}";
-            }
+            byte[] data = ReceiveAll(s, BitConverter.ToInt32(len, 0));
+            return Serialization.FromBytes<object>(data);
         }
+
+        static byte[] ReceiveAll(Socket s, int size)
+        {
+            byte[] b = new byte[size];
+            int r = 0;
+            while (r < size)
+            {
+                int x = s.Receive(b, r, size - r, SocketFlags.None);
+                if (x == 0) return null;
+                r += x;
+            }
+            return b;
+        }
+
+        static string Now() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        static DateTime ParseTime(string s) =>
+            DateTime.TryParseExact(s, "yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : DateTime.MinValue;
+
+        static FileData Clone(FileData f) =>
+            new FileData { Name = f.Name, Author = f.Author, Content = f.Content, LastModified = f.LastModified };
     }
 }

@@ -1,9 +1,9 @@
-﻿using System;
+﻿using Common;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace RequestManager
 {
@@ -11,44 +11,35 @@ namespace RequestManager
     {
         const int SOMAXCONN = 126;
 
-        const int CLIENT_TCP_PORT = 19010; // Client -> RequestManager
-        const int CLIENT_UDP_PORT = 19011; // Client -> RequestManager (STATS UDP) 
-
-        const int REPO_TCP_PORT = 19100;   // RequestManager -> Repository
+        const int RM_TCP_PORT = 19010;    // Client -> RM
+        const int REPO_TCP_PORT = 19100;  // RM -> Repo
         static readonly IPAddress REPO_IP = IPAddress.Loopback;
 
         static Dictionary<Socket, string> clientIds = new Dictionary<Socket, string>();
 
-        // evidencija “aktivnih zahteva” (zakljucano po fajlu)
-        static Dictionary<string, string> lockedBy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        static object locksGuard = new object();
+        // lista aktivnih zahteva (zauzeća)
+        static List<Request> activeRequests = new List<Request>();
+        static object guard = new object();
 
         static void Main(string[] args)
         {
-            Task.Run(() => UdpStatsServer());
+            Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            server.Bind(new IPEndPoint(IPAddress.Any, RM_TCP_PORT));
+            server.Listen(SOMAXCONN);
+            server.Blocking = false;
 
-            Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            IPEndPoint serverEP = new IPEndPoint(IPAddress.Any, CLIENT_TCP_PORT);
-            serverSocket.Bind(serverEP);
-
-            serverSocket.Blocking = false;
-            serverSocket.Listen(SOMAXCONN);
-
-            Console.WriteLine($"[RM] TCP slusa na {serverEP} (klijenti)");
-            Console.WriteLine($"[RM] UDP slusa na {IPAddress.Any}:{CLIENT_UDP_PORT} (STATS)");
-            Console.WriteLine($"[RM] Prosledjuje u repo {REPO_IP}:{REPO_TCP_PORT}");
+            Console.WriteLine($"[RM] TCP listening on {IPAddress.Any}:{RM_TCP_PORT}");
 
             List<Socket> clients = new List<Socket>();
-            byte[] buffer = new byte[8192];
 
             while (true)
             {
-                if (serverSocket.Poll(2000 * 1000, SelectMode.SelectRead))
+                if (server.Poll(2000 * 1000, SelectMode.SelectRead))
                 {
-                    Socket c = serverSocket.Accept();
+                    Socket c = server.Accept();
                     c.Blocking = false;
                     clients.Add(c);
-                    Console.WriteLine("[RM] Povezan klijent.");
+                    Console.WriteLine("[RM] Client connected.");
                 }
 
                 for (int i = clients.Count - 1; i >= 0; i--)
@@ -56,38 +47,31 @@ namespace RequestManager
                     Socket c = clients[i];
                     try
                     {
-                        if (c.Poll(10 * 1000, SelectMode.SelectRead))
+                        if (!c.Poll(10 * 1000, SelectMode.SelectRead))
+                            continue;
+
+                        object obj = ReceiveObject(c);
+                        if (obj == null)
                         {
-                            int br = c.Receive(buffer);
-
-                            if (br == 0)
-                            {
-                                ReleaseLocksIfKnown(c);
-
-                                Console.WriteLine("[RM] Klijent diskonekt.");
-                                c.Close();
-                                clients.RemoveAt(i);
-                                continue;
-                            }
-
-                            string req = Encoding.UTF8.GetString(buffer, 0, br).Trim();
-                            if (req.Length == 0) continue;
-
-                            if (req.StartsWith("HELLO|", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var p = req.Split('|');
-                                if (p.Length >= 2) clientIds[c] = p[1];
-                            }
-
-                            // presretni OPEN/CLOSE da bi RM bio autoritet za zauzece
-                            string resp = HandleWithLocks(req, c);
-
-                            c.Send(Encoding.UTF8.GetBytes(resp));
+                            ReleaseClientLocks(c);
+                            c.Close();
+                            clients.RemoveAt(i);
+                            Console.WriteLine("[RM] Client disconnected.");
+                            continue;
                         }
+
+                        // zapamti ClientId zbog lockova
+                        if (obj is Request rq && !string.IsNullOrWhiteSpace(rq.ClientId))
+                            clientIds[c] = rq.ClientId;
+                        else if (obj is object[] arr && arr.Length > 0 && arr[0] is Request rq2)
+                            clientIds[c] = rq2.ClientId;
+
+                        Response resp = HandleClient(obj);
+                        SendObject(c, resp);
                     }
                     catch
                     {
-                        ReleaseLocksIfKnown(c);
+                        ReleaseClientLocks(c);
                         try { c.Close(); } catch { }
                         clients.RemoveAt(i);
                     }
@@ -95,118 +79,192 @@ namespace RequestManager
             }
         }
 
-        static string HandleWithLocks(string req, Socket clientSocket)
+        // TCP FRAMING
+
+        static void SendObject(Socket s, object obj)
         {
-            var p = req.Split('|');
-            string cmd = p[0].ToUpperInvariant();
+            byte[] payload = Serialization.ToBytes(obj);
+            byte[] length = BitConverter.GetBytes(payload.Length);
 
-            if (cmd == "OPEN" && p.Length >= 3)
-            {
-                string name = p[1];
-                string clientId = p[2];
-
-                lock (locksGuard)
-                {
-                    if (lockedBy.TryGetValue(name, out var who) && !string.Equals(who, clientId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return "ODBIJENO";
-                    }
-                    lockedBy[name] = clientId;
-                }
-
-                string repoResp = ForwardToRepository(req);
-
-                // ako repo vrati gresku, lock
-                if (!repoResp.StartsWith("OK|OPENED", StringComparison.OrdinalIgnoreCase))
-                {
-                    lock (locksGuard)
-                    {
-                        if (lockedBy.TryGetValue(name, out var who) && string.Equals(who, clientId, StringComparison.OrdinalIgnoreCase))
-                            lockedBy.Remove(name);
-                    }
-                }
-
-                return repoResp;
-            }
-
-            if (cmd == "CLOSE" && p.Length >= 3)
-            {
-                string name = p[1];
-                string clientId = p[2];
-
-                lock (locksGuard)
-                {
-                    if (lockedBy.TryGetValue(name, out var who) && string.Equals(who, clientId, StringComparison.OrdinalIgnoreCase))
-                        lockedBy.Remove(name);
-                }
-
-                return ForwardToRepository(req);
-            }
-
-            // ostalo samo prosledi
-            return ForwardToRepository(req);
+            s.Send(length);
+            s.Send(payload);
         }
 
-        static void ReleaseLocksIfKnown(Socket c)
+        static object ReceiveObject(Socket s)
         {
-            if (clientIds.TryGetValue(c, out string cid))
-            {
-                // oslobodi sve iz RM evidencije
-                lock (locksGuard)
-                {
-                    var keys = new List<string>();
-                    foreach (var kv in lockedBy)
-                        if (string.Equals(kv.Value, cid, StringComparison.OrdinalIgnoreCase))
-                            keys.Add(kv.Key);
+            byte[] lenBuf = ReceiveAll(s, 4);
+            if (lenBuf == null) return null;
 
-                    foreach (var k in keys) lockedBy.Remove(k);
-                }
+            int len = BitConverter.ToInt32(lenBuf, 0);
+            byte[] data = ReceiveAll(s, len);
+            if (data == null) return null;
 
-                // oslobodi i u repo
-                ForwardToRepository("RELEASE_ALL|" + cid);
-                clientIds.Remove(c);
-            }
+            return Serialization.FromBytes<object>(data);
         }
 
-        static string ForwardToRepository(string request)
+        static byte[] ReceiveAll(Socket s, int size)
+        {
+            byte[] buffer = new byte[size];
+            int received = 0;
+
+            while (received < size)
+            {
+                int r = s.Receive(buffer, received, size - received, SocketFlags.None);
+                if (r == 0) return null;
+                received += r;
+            }
+
+            return buffer;
+        }
+
+        // LOCK 
+
+        static void ReleaseClientLocks(Socket c)
+        {
+            if (!clientIds.TryGetValue(c, out string clientId))
+                return;
+
+            lock (guard)
+            {
+                activeRequests.RemoveAll(r =>
+                    r.Operation == OperationType.Edit &&
+                    r.ClientId.Equals(clientId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            clientIds.Remove(c);
+        }
+
+        // CLIENT HANDLING
+
+        static Response HandleClient(object obj)
+        {
+            if (obj is Request req)
+            {
+                if (req.Operation == OperationType.Add)
+                    return new Response { Ok = false, Message = "SEND_FILEDATA_TOO" };
+
+                if (req.Operation == OperationType.Read)
+                    return ForwardToRepo(req, null);
+
+                if (req.Operation == OperationType.Delete)
+                {
+                    if (IsLockedByOther(req.FileName, req.ClientId))
+                        return new Response { Ok = false, Message = "ODBIJENO" };
+
+                    Lock(req.FileName, req.ClientId);
+                    Response resp = ForwardToRepo(req, null);
+                    Unlock(req.FileName, req.ClientId);
+                    return resp;
+                }
+
+                if (req.Operation == OperationType.Edit)
+                {
+                    if (IsLockedByOther(req.FileName, req.ClientId))
+                        return new Response { Ok = false, Message = "ODBIJENO" };
+
+                    Lock(req.FileName, req.ClientId);
+
+                    Response get = ForwardToRepo(new Request
+                    {
+                        ClientId = req.ClientId,
+                        FileName = req.FileName,
+                        Operation = OperationType.Read
+                    }, null);
+
+                    if (!get.Ok)
+                    {
+                        Unlock(req.FileName, req.ClientId);
+                        return get;
+                    }
+
+                    return new Response { Ok = true, Message = "EDIT_FILE", File = get.File };
+                }
+            }
+
+            if (obj is object[] arr2 && arr2.Length >= 2 &&
+                arr2[0] is Request r && arr2[1] is FileData f)
+            {
+                if (r.Operation == OperationType.Add)
+                    return ForwardToRepo(r, f);
+
+                if (r.Operation == OperationType.Edit)
+                {
+                    if (IsLockedByOther(r.FileName, r.ClientId))
+                        return new Response { Ok = false, Message = "ODBIJENO" };
+
+                    if (!IsLockedBySame(r.FileName, r.ClientId))
+                        return new Response { Ok = false, Message = "NOT_IN_EDIT" };
+
+                    Response resp = ForwardToRepo(r, f);
+                    Unlock(r.FileName, r.ClientId);
+                    return resp;
+                }
+            }
+
+            return new Response { Ok = false, Message = "BAD_FORMAT" };
+        }
+
+        // REPO
+
+        static Response ForwardToRepo(Request req, FileData file)
         {
             Socket repo = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             repo.Connect(new IPEndPoint(REPO_IP, REPO_TCP_PORT));
 
-            byte[] reqBytes = Encoding.UTF8.GetBytes(request);
-            repo.Send(reqBytes);
+            object payload = (file == null) ? (object)req : new object[] { req, file };
+            SendObject(repo, payload);
 
-            byte[] buffer = new byte[8192];
-            int br = repo.Receive(buffer);
-            string resp = Encoding.UTF8.GetString(buffer, 0, br);
-
+            Response resp = (Response)ReceiveObject(repo);
             repo.Close();
+
             return resp;
         }
 
-        static void UdpStatsServer()
+        // LOCK HELPERS
+
+        static bool IsLockedByOther(string fileName, string clientId)
         {
-            UdpClient udp = new UdpClient(CLIENT_UDP_PORT);
-            IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-
-            while (true)
+            lock (guard)
             {
-                try
-                {
-                    byte[] reqBytes = udp.Receive(ref remote);
-                    string req = Encoding.UTF8.GetString(reqBytes).Trim();
+                return activeRequests.Any(r =>
+                    r.Operation == OperationType.Edit &&
+                    r.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase) &&
+                    !r.ClientId.Equals(clientId, StringComparison.OrdinalIgnoreCase));
+            }
+        }
 
-                    // RM prosledi repo-u
-                    string resp = "ERROR|UDP_ONLY_STATS";
-                    if (req.StartsWith("STATS", StringComparison.OrdinalIgnoreCase))
-                        resp = ForwardToRepository(req);
+        static bool IsLockedBySame(string fileName, string clientId)
+        {
+            lock (guard)
+            {
+                return activeRequests.Any(r =>
+                    r.Operation == OperationType.Edit &&
+                    r.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase) &&
+                    r.ClientId.Equals(clientId, StringComparison.OrdinalIgnoreCase));
+            }
+        }
 
-                    byte[] respBytes = Encoding.UTF8.GetBytes(resp);
-                    udp.Send(respBytes, respBytes.Length, remote);
-                }
-                catch
+        static void Lock(string fileName, string clientId)
+        {
+            lock (guard)
+            {
+                activeRequests.Add(new Request
                 {
-                }
+                    FileName = fileName,
+                    ClientId = clientId,
+                    Operation = OperationType.Edit
+                });
+            }
+        }
+
+        static void Unlock(string fileName, string clientId)
+        {
+            lock (guard)
+            {
+                activeRequests.RemoveAll(r =>
+                    r.Operation == OperationType.Edit &&
+                    r.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase) &&
+                    r.ClientId.Equals(clientId, StringComparison.OrdinalIgnoreCase));
             }
         }
     }
