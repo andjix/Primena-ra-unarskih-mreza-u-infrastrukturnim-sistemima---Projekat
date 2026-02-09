@@ -5,6 +5,7 @@ namespace Common
 {
     public static class Serialization
     {
+        // serijalizacija
         public static byte[] ToBytes(object obj)
         {
             using (MemoryStream ms = new MemoryStream())
@@ -15,6 +16,7 @@ namespace Common
             }
         }
 
+        // deserijalizacija
         public static T FromBytes<T>(byte[] bytes)
         {
             using (MemoryStream ms = new MemoryStream(bytes))

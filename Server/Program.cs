@@ -26,6 +26,7 @@ namespace RepositoryServer
             {
                 Task.Run(() => UdpServer());
 
+                // uticnice za komunikaciju sa RM
                 Socket tcpServer = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                 tcpServer.Bind(new IPEndPoint(IPAddress.Any, REPO_TCP_PORT));
                 tcpServer.Listen(SOMAXCONN);
@@ -37,12 +38,14 @@ namespace RepositoryServer
 
                 while (true)
                 {
+                    // multipleksiranje - slusa sve
                     List<Socket> readSockets = new List<Socket>();
                     readSockets.Add(tcpServer);
                     readSockets.AddRange(rms);
 
                     Socket.Select(readSockets, null, null, 2000 * 1000);
 
+                    // prihvatanje RM konekcija
                     if (readSockets.Contains(tcpServer))
                     {
                         Socket rm = tcpServer.Accept();
@@ -52,6 +55,7 @@ namespace RepositoryServer
                         readSockets.Remove(tcpServer);
                     }
 
+                    // detektuje da li je TCP konekcija sa upravljacem zahteva prekinuta
                     foreach (Socket rm in readSockets.ToList())
                     {
                         try
@@ -64,6 +68,7 @@ namespace RepositoryServer
                                 continue;
                             }
 
+                            // uspostavlja vezu sa repozitorijumom i prosledjuje zahteve
                             Response resp = HandleTcp(obj) ?? new Response { Ok = false, Message = "REPO_INTERNAL_ERROR" };
                             SendObject(rm, resp);
                         }
@@ -127,8 +132,10 @@ namespace RepositoryServer
                         continue;
                     }
 
+                    // da li handleUdp vraca validan obj ili null
                     Response resp = HandleUdp(obj) ?? new Response { Ok = false, Message = "REPO_INTERNAL_ERROR" };
 
+                    // salje odgovor onom ko je poslao zahtev
                     byte[] outBytes = Serialization.ToBytes(resp);
                     try { udp.SendTo(outBytes, remote); } catch { }
                 }
@@ -140,6 +147,7 @@ namespace RepositoryServer
             }
         }
 
+        // prima UDP poruku, prepozna komandu i vraca odgovarajuci response
         static Response HandleUdp(object obj)
         {
             string s = obj as string;
@@ -198,8 +206,7 @@ namespace RepositoryServer
             return new Response { Ok = false, Message = "UNKNOWN_UDP" };
         }
 
-        // TCP
-
+        // TCP - da li je dobio komandu ili komandu + fajl
         static Response HandleTcp(object obj)
         {
             if (obj is Request r)
@@ -210,7 +217,8 @@ namespace RepositoryServer
 
             return new Response { Ok = false, Message = "BAD_TCP" };
         }
-
+        
+        // rad nad datotekama - ADD, READ, EDIT...
         static Response HandleRepoRequest(Request r, FileData f)
         {
             lock (guard)
@@ -276,7 +284,6 @@ namespace RepositoryServer
         }
 
         // TCP FRAMING
-
         static void SendObject(Socket s, object o)
         {
             byte[] data = Serialization.ToBytes(o);
@@ -329,6 +336,7 @@ namespace RepositoryServer
             DateTime.TryParseExact(s, "yyyy-MM-dd HH:mm:ss",
                 CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : DateTime.MinValue;
 
+        // saljemo kopiju da bismo zastitili internu listu
         static FileData Clone(FileData f) =>
             new FileData
             {

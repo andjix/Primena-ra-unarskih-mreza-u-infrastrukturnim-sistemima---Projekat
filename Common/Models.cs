@@ -19,6 +19,7 @@ namespace Common
         Delete 
     }
 
+    // za zahteve
     [Serializable]
     public class Request    
     {
@@ -27,6 +28,7 @@ namespace Common
         public string ClientId;        
     }
 
+    // poruke koje server vraca klijentu
     [Serializable]
     public class Response
     {

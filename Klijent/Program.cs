@@ -3,6 +3,7 @@ using System;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.ConstrainedExecution;
 
 namespace FileClient
 {
@@ -36,7 +37,7 @@ namespace FileClient
 
                 Socket tcp = null;
 
-                
+                // proverava da li je veza aktivna i omogucava ponovno povezivanje ako pukne
                 bool EnsureConnected()
                 {
                     try
@@ -296,6 +297,7 @@ namespace FileClient
             s.Send(d);
         }
 
+        // pokusava da primi odgovor sa servera
         static bool TryReceiveResponse(Socket s, out Response resp)
         {
             resp = null;
@@ -311,6 +313,7 @@ namespace FileClient
             return true;
         }
 
+        // prima jedan ceo objekat preko TCP-a
         static object ReceiveObject(Socket s)
         {
             byte[] len = ReceiveAll(s, 4);
@@ -325,6 +328,7 @@ namespace FileClient
             return Serialization.FromBytes<object>(data);
         }
 
+        // prima tacno zadati broj bajtova sa soketa
         static byte[] ReceiveAll(Socket s, int size)
         {
             try
