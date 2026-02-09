@@ -217,21 +217,27 @@ namespace RepositoryServer
             {
                 if (r.Operation == OperationType.Add)
                 {
-                    
                     string name = f?.Name ?? r?.FileName;
                     if (string.IsNullOrWhiteSpace(name))
                         return new Response { Ok = false, Message = "BAD_NAME" };
 
-                    
                     if (files.Any(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase)))
                         return new Response { Ok = false, Message = "ALREADY_EXISTS" };
 
-                    
+                    if (f == null) return new Response { Ok = false, Message = "NO_FILEDATA" };
+
                     f.Name = name;
+
+                    // repo dodeljuje autora (ako nije stigao) i postavlja vreme kad primi objekat
+                    if (string.IsNullOrWhiteSpace(f.Author))
+                        f.Author = r.ClientId;
+
+                    f.LastModified = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
                     files.Add(Clone(f));
                     return new Response { Ok = true };
                 }
+
 
                 if (r.Operation == OperationType.Read)
                 {
@@ -248,9 +254,13 @@ namespace RepositoryServer
                     if (f == null) return new Response { Ok = false, Message = "NO_FILEDATA" };
 
                     x.Content = f.Content;
-                    x.LastModified = f.LastModified;
+
+                    // repo postavlja vreme kad primi izmenjeni objekat
+                    x.LastModified = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
                     return new Response { Ok = true, File = Clone(x) };
                 }
+
 
                 if (r.Operation == OperationType.Delete)
                 {

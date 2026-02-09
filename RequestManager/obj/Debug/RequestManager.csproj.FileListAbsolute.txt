@@ -16,3 +16,6 @@ C:\Users\PC\source\repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima-
 C:\Users\PC\source\repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestM.D6730908.Up2Date
 C:\Users\PC\source\repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.exe
 C:\Users\PC\source\repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestManager.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\bin\Debug\Common.dll
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\bin\Debug\Common.pdb
+C:\Users\Andja\Source\Repos\Primena-ra-unarskih-mreza-u-infrastrukturnim-sistemima---Projekat\RequestManager\obj\Debug\RequestM.D6730908.Up2Date

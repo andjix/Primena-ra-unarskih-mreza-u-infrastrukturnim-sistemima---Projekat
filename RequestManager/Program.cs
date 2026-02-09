@@ -229,7 +229,6 @@ namespace RequestManager
                     if (r.Operation == OperationType.Add)
                     {
                         f.Author = r.ClientId;
-                        f.LastModified = Now();
                         return ForwardToRepo(r, f);
                     }
 
@@ -240,8 +239,6 @@ namespace RequestManager
 
                         if (!IsLockedBySame(r.FileName, r.ClientId))
                             return new Response { Ok = false, Message = "NOT_IN_EDIT" };
-
-                        f.LastModified = Now();
 
                         Response resp = ForwardToRepo(r, f);
                         Unlock(r.FileName, r.ClientId);
