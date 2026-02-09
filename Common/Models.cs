@@ -3,12 +3,12 @@
 namespace Common
 {
     [Serializable]
-    public class FileData   // Datoteka
+    public class FileData   
     {
-        public string Name;            // Naziv
-        public string Author;          // Autor 
-        public string LastModified;    // Vremenski trenutak poslednje promene
-        public string Content;         // Sadrzaj 
+        public string Name;            
+        public string Author;          
+        public string LastModified;    
+        public string Content;         
     }
 
     public enum OperationType
@@ -20,11 +20,11 @@ namespace Common
     }
 
     [Serializable]
-    public class Request    // Zahtev
+    public class Request    
     {
-        public string FileName;        // Putanja/ime datoteke
+        public string FileName;        
         public OperationType Operation;
-        public string ClientId;        // korisnicko ime (da RM moze da vodi evidenciju)
+        public string ClientId;        
     }
 
     [Serializable]
@@ -34,7 +34,7 @@ namespace Common
         public string Message;    
         public FileData File;  
         public FileData[] Files;   
-        public int RmTcpPort;      // odgovor na PRIJAVA
-        public string StatsText;   // odgovor na STATS
+        public int RmTcpPort;      
+        public string StatsText;   
     }
 }

@@ -17,65 +17,86 @@ namespace RequestManager
 
         static Dictionary<Socket, string> clientIds = new Dictionary<Socket, string>();
 
-        // lista aktivnih zahteva (zauzeća)
+       
         static List<Request> activeRequests = new List<Request>();
         static object guard = new object();
 
         static void Main(string[] args)
         {
-            Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            server.Bind(new IPEndPoint(IPAddress.Any, RM_TCP_PORT));
-            server.Listen(SOMAXCONN);
-            server.Blocking = false;
-
-            Console.WriteLine($"[RM] TCP listening on {IPAddress.Any}:{RM_TCP_PORT}");
-
-            List<Socket> clients = new List<Socket>();
-
-            while (true)
+            try
             {
-                if (server.Poll(2000 * 1000, SelectMode.SelectRead))
-                {
-                    Socket c = server.Accept();
-                    c.Blocking = false;
-                    clients.Add(c);
-                    Console.WriteLine("[RM] Client connected.");
-                }
+                Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                server.Bind(new IPEndPoint(IPAddress.Any, RM_TCP_PORT));
+                server.Listen(SOMAXCONN);
+                server.Blocking = false;
 
-                for (int i = clients.Count - 1; i >= 0; i--)
+                Console.WriteLine($"[RM] TCP listening on {IPAddress.Any}:{RM_TCP_PORT}");
+
+                List<Socket> clients = new List<Socket>();
+
+                while (true)
                 {
-                    Socket c = clients[i];
-                    try
+                    List<Socket> readSockets = new List<Socket>();
+                    readSockets.Add(server);
+                    readSockets.AddRange(clients);
+
+                    Socket.Select(readSockets, null, null, 2000 * 1000);
+
+                    // novi klijent
+                    if (readSockets.Contains(server))
                     {
-                        if (!c.Poll(10 * 1000, SelectMode.SelectRead))
-                            continue;
+                        Socket c = server.Accept();
+                        c.Blocking = false;
+                        clients.Add(c);
+                        Console.WriteLine("[RM] Client connected.");
+                        readSockets.Remove(server);
+                    }
 
-                        object obj = ReceiveObject(c);
-                        if (obj == null)
+                    // poruke od klijenata
+                    foreach (Socket c in readSockets.ToList())
+                    {
+                        try
                         {
-                            ReleaseClientLocks(c);
-                            c.Close();
-                            clients.RemoveAt(i);
-                            Console.WriteLine("[RM] Client disconnected.");
-                            continue;
+                            object obj = ReceiveObject(c);
+                            if (obj == null)
+                            {
+                                ReleaseClientLocks(c);
+                                SafeClose(c);
+                                clients.Remove(c);
+                                Console.WriteLine("[RM] Client disconnected.");
+                                continue;
+                            }
+
+                           
+                            if (obj is Request rq && !string.IsNullOrWhiteSpace(rq.ClientId))
+                                clientIds[c] = rq.ClientId;
+                            else if (obj is object[] arr && arr.Length > 0 && arr[0] is Request rq2)
+                                clientIds[c] = rq2.ClientId;
+
+                            Response resp = HandleClient(obj);
+
+                            
+                            if (resp == null)
+                                resp = new Response { Ok = false, Message = "RM_INTERNAL_ERROR" };
+
+                            SendObject(c, resp);
                         }
-
-                        // zapamti ClientId zbog lockova
-                        if (obj is Request rq && !string.IsNullOrWhiteSpace(rq.ClientId))
-                            clientIds[c] = rq.ClientId;
-                        else if (obj is object[] arr && arr.Length > 0 && arr[0] is Request rq2)
-                            clientIds[c] = rq2.ClientId;
-
-                        Response resp = HandleClient(obj);
-                        SendObject(c, resp);
-                    }
-                    catch
-                    {
-                        ReleaseClientLocks(c);
-                        try { c.Close(); } catch { }
-                        clients.RemoveAt(i);
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("[RM] ERROR (client): " + ex.Message);
+                            ReleaseClientLocks(c);
+                            SafeClose(c);
+                            clients.Remove(c);
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                
+                Console.WriteLine("[RM] FATAL: " + ex);
+                Console.WriteLine("Pritisni bilo koji taster...");
+                Console.ReadKey();
             }
         }
 
@@ -96,6 +117,8 @@ namespace RequestManager
             if (lenBuf == null) return null;
 
             int len = BitConverter.ToInt32(lenBuf, 0);
+            if (len <= 0) return null;
+
             byte[] data = ReceiveAll(s, len);
             if (data == null) return null;
 
@@ -104,20 +127,37 @@ namespace RequestManager
 
         static byte[] ReceiveAll(Socket s, int size)
         {
-            byte[] buffer = new byte[size];
-            int received = 0;
-
-            while (received < size)
+            try
             {
-                int r = s.Receive(buffer, received, size - received, SocketFlags.None);
-                if (r == 0) return null;
-                received += r;
-            }
+                byte[] buffer = new byte[size];
+                int received = 0;
 
-            return buffer;
+                while (received < size)
+                {
+                    int r = s.Receive(buffer, received, size - received, SocketFlags.None);
+                    if (r == 0) return null;
+                    received += r;
+                }
+
+                return buffer;
+            }
+            catch (SocketException)
+            {
+                return null;
+            }
+            catch (ObjectDisposedException)
+            {
+                return null;
+            }
         }
 
-        // LOCK 
+        static void SafeClose(Socket s)
+        {
+            try { s.Shutdown(SocketShutdown.Both); } catch { }
+            try { s.Close(); } catch { }
+        }
+
+        // LOCK
 
         static void ReleaseClientLocks(Socket c)
         {
@@ -138,87 +178,114 @@ namespace RequestManager
 
         static Response HandleClient(object obj)
         {
-            if (obj is Request req)
+            try
             {
-                if (req.Operation == OperationType.Add)
-                    return new Response { Ok = false, Message = "SEND_FILEDATA_TOO" };
-
-                if (req.Operation == OperationType.Read)
-                    return ForwardToRepo(req, null);
-
-                if (req.Operation == OperationType.Delete)
+                if (obj is Request req)
                 {
-                    if (IsLockedByOther(req.FileName, req.ClientId))
-                        return new Response { Ok = false, Message = "ODBIJENO" };
+                    if (req.Operation == OperationType.Add)
+                        return new Response { Ok = false, Message = "SEND_FILEDATA_TOO" };
 
-                    Lock(req.FileName, req.ClientId);
-                    Response resp = ForwardToRepo(req, null);
-                    Unlock(req.FileName, req.ClientId);
-                    return resp;
-                }
+                    if (req.Operation == OperationType.Read)
+                        return ForwardToRepo(req, null);
 
-                if (req.Operation == OperationType.Edit)
-                {
-                    if (IsLockedByOther(req.FileName, req.ClientId))
-                        return new Response { Ok = false, Message = "ODBIJENO" };
-
-                    Lock(req.FileName, req.ClientId);
-
-                    Response get = ForwardToRepo(new Request
+                    if (req.Operation == OperationType.Delete)
                     {
-                        ClientId = req.ClientId,
-                        FileName = req.FileName,
-                        Operation = OperationType.Read
-                    }, null);
+                        if (IsLockedByOther(req.FileName, req.ClientId))
+                            return new Response { Ok = false, Message = "ODBIJENO" };
 
-                    if (!get.Ok)
-                    {
+                        Lock(req.FileName, req.ClientId);
+                        Response resp = ForwardToRepo(req, null);
                         Unlock(req.FileName, req.ClientId);
-                        return get;
+                        return resp;
                     }
 
-                    return new Response { Ok = true, Message = "EDIT_FILE", File = get.File };
+                    if (req.Operation == OperationType.Edit)
+                    {
+                        if (IsLockedByOther(req.FileName, req.ClientId))
+                            return new Response { Ok = false, Message = "ODBIJENO" };
+
+                        Lock(req.FileName, req.ClientId);
+
+                        Response get = ForwardToRepo(new Request
+                        {
+                            ClientId = req.ClientId,
+                            FileName = req.FileName,
+                            Operation = OperationType.Read
+                        }, null);
+
+                        if (get == null || !get.Ok)
+                        {
+                            Unlock(req.FileName, req.ClientId);
+                            return get ?? new Response { Ok = false, Message = "REPO_NO_RESPONSE" };
+                        }
+
+                        return new Response { Ok = true, Message = "EDIT_FILE", File = get.File };
+                    }
                 }
-            }
 
-            if (obj is object[] arr2 && arr2.Length >= 2 &&
-                arr2[0] is Request r && arr2[1] is FileData f)
-            {
-                if (r.Operation == OperationType.Add)
-                    return ForwardToRepo(r, f);
-
-                if (r.Operation == OperationType.Edit)
+                if (obj is object[] arr2 && arr2.Length >= 2 &&
+                    arr2[0] is Request r && arr2[1] is FileData f)
                 {
-                    if (IsLockedByOther(r.FileName, r.ClientId))
-                        return new Response { Ok = false, Message = "ODBIJENO" };
+                    if (r.Operation == OperationType.Add)
+                    {
+                        f.Author = r.ClientId;
+                        f.LastModified = Now();
+                        return ForwardToRepo(r, f);
+                    }
 
-                    if (!IsLockedBySame(r.FileName, r.ClientId))
-                        return new Response { Ok = false, Message = "NOT_IN_EDIT" };
+                    if (r.Operation == OperationType.Edit)
+                    {
+                        if (IsLockedByOther(r.FileName, r.ClientId))
+                            return new Response { Ok = false, Message = "ODBIJENO" };
 
-                    Response resp = ForwardToRepo(r, f);
-                    Unlock(r.FileName, r.ClientId);
-                    return resp;
+                        if (!IsLockedBySame(r.FileName, r.ClientId))
+                            return new Response { Ok = false, Message = "NOT_IN_EDIT" };
+
+                        f.LastModified = Now();
+
+                        Response resp = ForwardToRepo(r, f);
+                        Unlock(r.FileName, r.ClientId);
+                        return resp;
+                    }
                 }
-            }
 
-            return new Response { Ok = false, Message = "BAD_FORMAT" };
+                return new Response { Ok = false, Message = "BAD_FORMAT" };
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[RM] ERROR (HandleClient): " + ex.Message);
+                return new Response { Ok = false, Message = "RM_INTERNAL_ERROR" };
+            }
         }
 
-        // REPO
+        
 
         static Response ForwardToRepo(Request req, FileData file)
         {
-            Socket repo = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            repo.Connect(new IPEndPoint(REPO_IP, REPO_TCP_PORT));
+            try
+            {
+                Socket repo = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                repo.Connect(new IPEndPoint(REPO_IP, REPO_TCP_PORT));
 
-            object payload = (file == null) ? (object)req : new object[] { req, file };
-            SendObject(repo, payload);
+                object payload = (file == null) ? (object)req : new object[] { req, file };
+                SendObject(repo, payload);
 
-            Response resp = (Response)ReceiveObject(repo);
-            repo.Close();
+                object o = ReceiveObject(repo);
+                SafeClose(repo);
 
-            return resp;
+                if (o == null)
+                    return new Response { Ok = false, Message = "REPO_NO_RESPONSE" };
+
+                return (Response)o;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[RM] ERROR (Repo): " + ex.Message);
+                return new Response { Ok = false, Message = "REPO_DOWN" };
+            }
         }
+
+        static string Now() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         // LOCK HELPERS
 
